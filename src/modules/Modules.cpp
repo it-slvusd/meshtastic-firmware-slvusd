@@ -42,6 +42,9 @@
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "modules/PositionModule.h"
 #endif
+#if !MESHTASTIC_EXCLUDE_GPSTRACKING && !MESHTASTIC_EXCLUDE_GPS
+#include "modules/GpsTrackingModule.h"
+#endif
 #if !MESHTASTIC_EXCLUDE_REMOTEHARDWARE
 #include "modules/RemoteHardwareModule.h"
 #endif
@@ -162,6 +165,9 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_GPS
     positionModule = new PositionModule();
+#endif
+#if !MESHTASTIC_EXCLUDE_GPSTRACKING && !MESHTASTIC_EXCLUDE_GPS
+    gpsTrackingModule = new GpsTrackingModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_WAYPOINT
     waypointModule = new WaypointModule();
