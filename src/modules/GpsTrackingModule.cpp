@@ -13,12 +13,18 @@
 GpsTrackingModule *gpsTrackingModule;
 
 // --- Tune these thresholds ---
-#define MOTION_THRESHOLD 1.2f       // Acceleration delta (m/s²) to count as motion
+#define MOTION_THRESHOLD    1.2f       // Acceleration delta (m/s²) to count as motion
+#define REQUIRED_STREAK     3
+
 #define TRACKING_INTERVAL_MS 15000  // How often to send GPS when active
 #define IDLE_TIMEOUT_MS 300000      // 5 minutes of no motion before turning off GPS
 #define GPS_LOCK_TIMEOUT_MS 30000   // Max time to wait for GPS fix before sleeping again
 // Polling intervals: adaptive for low power
 #define POLL_ACTIVE_MS 200          // Poll accel every 200ms when moving
+
+#define GPS_UPDATE_SECS         8
+#define GPS_UPDATE_SECS_IDLE    3 * 60 * 60 // 3hr
+#define GPS_BROADCAST_SECS      3 * 60 * 60 // 3hr
 // -----------------------------
 
 #define LIS3DH_ADDR 0x18
@@ -32,6 +38,11 @@ GpsTrackingModule::GpsTrackingModule()
     , concurrency::OSThread("GpsTracking")
 {
     initLIS3DH();
+    config.position.gps_update_interval = GPS_UPDATE_SECS;
+    config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
+    gpsIsOn = true;
+
+    active = true;
     setIntervalFromNow(0);
 }
 
@@ -53,22 +64,44 @@ void GpsTrackingModule::initLIS3DH()
 void GpsTrackingModule::enableGps()
 {
     if (!gpsIsOn) {
-        config.position.gps_update_interval = 8; // < 10 to prevent gps go to sleep
-        config.position.position_broadcast_secs = 300;
+        config.position.gps_update_interval = GPS_UPDATE_SECS; 
+        config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
         gps->up();
         gpsIsOn = true;
-        LOG_INFO("GpsTrackingModule: GPS powered ON");
+        LOG_INFO("GpsTrackingModule: GPS powered ONNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN");
     }
+
+    RadioInterface *rif = router->getRadioIface();
+    rif->reconfigure();
+    rif->init();
 }
 
 void GpsTrackingModule::disableGps()
 {
     if (gpsIsOn) {
-        config.position.gps_update_interval = 3 * 60 * 60; // 3hr
-        config.position.position_broadcast_secs = 3 * 60 * 60; // 3hr
+        config.position.gps_update_interval = GPS_UPDATE_SECS_IDLE;
+        config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
         gps->down();
         gpsIsOn = false;
-        LOG_INFO("GpsTrackingModule: GPS powered OFF");
+        LOG_INFO("GpsTrackingModule: GPS powered OFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
+    }
+
+    RadioInterface *rif = router ? router->getRadioIface() : nullptr;
+
+    uint8_t retries = 0;
+    const uint8_t maxRetries = 10; // Prevent infinite loop (3-second max timeout)
+
+    while (!rif->canSleep(true /* deepSleep */) && retries < maxRetries) {
+        LOG_DEBUG("GpsTrackingModule: Waiting for RadioInterface to allow sleep (%d/%d)", retries + 1, maxRetries);
+        delay(300);
+        retries++;
+    }
+
+    if (rif->canSleep(true)) {
+        rif->sleep();
+        LOG_INFO("GpsTrackingModule: RadioInterface Sleep!");
+    } else {
+        LOG_WARN("GpsTrackingModule: RadioInterface busy, sleep skipped");
     }
 }
 
@@ -85,7 +118,6 @@ bool GpsTrackingModule::isMotionDetected()
     prevMagnitude = magnitude;
 
     static uint8_t motionStreak = 0;
-    constexpr uint8_t REQUIRED_STREAK = 3;
 
     // LOG_INFO("GpsTrackingModule: delta=%.2f thresh=%.2f", delta, MOTION_THRESHOLD);
     if (delta > MOTION_THRESHOLD) {
@@ -125,27 +157,37 @@ int32_t GpsTrackingModule::runOnce()
         if (idle >= IDLE_TIMEOUT_MS) {
             active = false;
             disableGps();
-            LOG_INFO("GpsTrackingModule: No motion for 5 min - GPS Tracking Off");
+            // LOG_INFO("GpsTrackingModule: No motion for 5 min - GPS Tracking Off");
             return POLL_ACTIVE_MS;
         }
 
         if (Throttle::hasElapsed(lastLocationSendMs, TRACKING_INTERVAL_MS)) {
             lastLocationSendMs = now;
             sendGpsPayload(motion);
-            if (motion) {
-                LOG_INFO("GpsTrackingModule: GPS Tracking On (motion)");
-            } else {
-                LOG_INFO("GpsTrackingModule: GPS Tracking On (no-motion)");
-            }
+            // if (motion) {
+            //     LOG_INFO("GpsTrackingModule: GPS Tracking On (motion)");
+            // } else {
+            //     LOG_INFO("GpsTrackingModule: GPS Tracking On (no-motion)");
+            // }
         }
 
         return POLL_ACTIVE_MS;
     }
 
+    // Reboot to boot loop until power OK
+    int BattMv = powerStatus->getBatteryVoltageMv();
+    if (BattMv < SAFE_VDD_VOLTAGE_THRESHOLD_MV) {
+        LOG_INFO("GpsTracking: Battery %d (too low)", BattMv);
+        if (!powerStatus->getHasUSB()) {
+            digitalWrite(PIN_3V3_EN, LOW);
+            rebootAtMsec = millis() + 5000;
+            return disable();
+        }
+    }
+
     return POLL_ACTIVE_MS;
 }
 
-// uint32_t gpsLockedAtMs = 0;
 int32_t lastGoodLatitudeI = 0;
 int32_t lastGoodLongitudeI = 0;
 int32_t lastGoodAltitude = 0;
@@ -208,11 +250,11 @@ void GpsTrackingModule::sendGpsPayload(bool motionActive)
             if (timeInfo) {
                 char timeString[9];
                 strftime(timeString, sizeof(timeString), "%H:%M:%S", timeInfo);
-                LOG_INFO("Formatted time: %s", timeString);
+                // LOG_INFO("Formatted time: %s", timeString);
             }
             payload.short_timestamp = (uint16_t)(epochSecs & 0xFFFF);
         } else {
-            LOG_INFO("Formatted time: [RTC Not Synced]");
+            // LOG_INFO("Formatted time: [RTC Not Synced]");
             payload.short_timestamp = 0;
         }
 

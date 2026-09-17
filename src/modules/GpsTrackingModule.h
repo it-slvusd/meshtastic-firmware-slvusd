@@ -4,6 +4,11 @@
 #include "concurrency/OSThread.h"
 #include "../mesh/SinglePortModule.h"
 
+#ifndef SAFE_VDD_VOLTAGE_THRESHOLD_MV
+#define SAFE_VDD_VOLTAGE_THRESHOLD_MV 3300
+#endif
+
+
 #pragma pack(push, 1)
 /**
  * @brief 17-Byte Ultra-Compact Payload Structure
