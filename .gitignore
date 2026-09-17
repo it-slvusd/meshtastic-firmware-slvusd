@@ -75,3 +75,5 @@ build/wasm/
 build/wasm-obj/
 build/wasm-*.log
 .emsdk/
+.vscode/extensions.json
+.vscode/settings.json

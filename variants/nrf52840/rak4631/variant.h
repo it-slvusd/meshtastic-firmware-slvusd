@@ -55,6 +55,7 @@ extern "C" {
 /*
  * Buttons
  */
+#define HAS_BUTTON 0 // fix shutdown problem
 
 // #define PIN_BUTTON1 9 // Pin for button on E-ink button module or IO expansion
 #define BUTTON_NEED_PULLUP

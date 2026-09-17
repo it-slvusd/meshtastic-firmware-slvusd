@@ -46,7 +46,7 @@
 #include "modules/GpsTrackingModule.h"
 #endif
 #if !MESHTASTIC_EXCLUDE_REMOTEHARDWARE
-#include "modules/RemoteHardwareModule.h"
+    #include "modules/RemoteHardwareModule.h"
 #endif
 #if !MESHTASTIC_EXCLUDE_POWERSTRESS
 #include "modules/PowerStressModule.h"
@@ -120,6 +120,10 @@
 #endif
 #if !MESHTASTIC_EXCLUDE_STATUS
 #include "modules/StatusMessageModule.h"
+#endif
+// GpsTrackingModule
+#if !MESHTASTIC_EXCLUDE_GPSTRACKING && !MESHTASTIC_EXCLUDE_GPS
+#include "modules/GpsTrackingModule.h"
 #endif
 
 #if defined(HAS_HARDWARE_WATCHDOG)
