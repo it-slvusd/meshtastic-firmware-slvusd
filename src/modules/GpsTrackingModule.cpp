@@ -156,6 +156,7 @@ uint32_t lastPayloadSentMs = 0;
 void GpsTrackingModule::sendGpsPayload(bool motionActive)
 {
     if (!gps || !gpsStatus) {
+        LOG_INFO("sendGpsPayload: !gps || !gpsStatus");
         return;
     }
 
@@ -276,6 +277,7 @@ void GpsTrackingModule::sendGpsPayload(bool motionActive)
         b64buf[i * 4 + 3] = b64[val & 0x3F];
     }
     b64buf[24] = '\0';
+    LOG_INFO("GpsTracking: sent gps_payload %s (%s)", b64buf, hasLock ? "fix" : "no-fix");
 
     // --- 7. Dispatch via Meshtastic Mesh ---
     meshtastic_MeshPacket *p = allocDataPacket();
@@ -285,7 +287,5 @@ void GpsTrackingModule::sendGpsPayload(bool motionActive)
     memcpy(p->decoded.payload.bytes, b64buf, strlen(b64buf));
 
     service->sendToMesh(p);
-
     lastPayloadSentMs = now;
-    LOG_INFO("GpsTracking: sent gps_payload %s (%s)", b64buf, hasLock ? "fix" : "no-fix");
 }
