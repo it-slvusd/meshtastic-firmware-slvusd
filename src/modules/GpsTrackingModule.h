@@ -61,13 +61,14 @@ protected:
 
 private:
     void initLIS3DH();
-    void enableGps();
-    void disableGps();
+    void enableGpsAndLora();
+    void disableGpsAndLora();
     bool isMotionDetected();
     void sendGpsPayload(bool motionActive);
 
     unsigned long lastLocationSendMs = 0;
     unsigned long lastMotionMs = 0;
+    unsigned long lastLoraSleepMs = 0;
     float prevMagnitude = 9.81f;
     bool active = false;
 };

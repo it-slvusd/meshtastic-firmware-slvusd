@@ -10,17 +10,23 @@
 #include <pb_encode.h>
 #include "RTC.h"
 
+/*
+    Running 40mA
+    Idle    >1mA
+    if Vbat < 3300, reboot -> stucked in boot loop until reach 3500
+*/
+
 GpsTrackingModule *gpsTrackingModule;
 
 // --- Tune these thresholds ---
+#define POLL_ACTIVE_MS      200          // Poll accel every 200ms
 #define MOTION_THRESHOLD    1.2f       // Acceleration delta (m/s²) to count as motion
 #define REQUIRED_STREAK     3
 
-#define TRACKING_INTERVAL_MS 15000  // How often to send GPS when active
-#define IDLE_TIMEOUT_MS 300000      // 5 minutes of no motion before turning off GPS
-#define GPS_LOCK_TIMEOUT_MS 30000   // Max time to wait for GPS fix before sleeping again
-// Polling intervals: adaptive for low power
-#define POLL_ACTIVE_MS 200          // Poll accel every 200ms when moving
+#define TRACKING_INTERVAL_MS    15000  // How often to send GPS when active
+#define IDLE_TIMEOUT_MS         300000      // 5 minutes of no motion before turning off GPS
+
+#define LORA_SLEEP_RECHECK      30 * 1000
 
 #define GPS_UPDATE_SECS         8
 #define GPS_UPDATE_SECS_IDLE    3 * 60 * 60 // 3hr
@@ -32,12 +38,19 @@ GpsTrackingModule *gpsTrackingModule;
 static Adafruit_LIS3DH lis;
 static bool lisInitialized = false;
 static bool gpsIsOn = false;
+static bool sleeping = false;
 
 GpsTrackingModule::GpsTrackingModule()
     : SinglePortModule("gps_tracking", meshtastic_PortNum_UNKNOWN_APP)
     , concurrency::OSThread("GpsTracking")
 {
     initLIS3DH();
+    config.power.is_power_saving = true;
+    config.bluetooth.enabled = false;
+    
+    config.device.role = meshtastic_Config_DeviceConfig_Role_TRACKER; //meshtastic_Config_DeviceConfig_Role_CLIENT
+    config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY;
+
     config.position.gps_update_interval = GPS_UPDATE_SECS;
     config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
     gpsIsOn = true;
@@ -61,8 +74,11 @@ void GpsTrackingModule::initLIS3DH()
     }
 }
 
-void GpsTrackingModule::enableGps()
+void GpsTrackingModule::enableGpsAndLora()
 {
+    sleeping = false;
+    config.device.led_heartbeat_disabled = false;
+
     if (!gpsIsOn) {
         config.position.gps_update_interval = GPS_UPDATE_SECS; 
         config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
@@ -71,13 +87,21 @@ void GpsTrackingModule::enableGps()
         LOG_INFO("GpsTrackingModule: GPS powered ONNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN");
     }
 
-    RadioInterface *rif = router->getRadioIface();
-    rif->reconfigure();
-    rif->init();
+    RadioInterface *rif = router ? router->getRadioIface() : nullptr;
+    if (rif) {
+        config.device.role = meshtastic_Config_DeviceConfig_Role_TRACKER; //meshtastic_Config_DeviceConfig_Role_CLIENT
+        config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY;
+        rif->sleeping = false;
+        rif->reconfigure();
+        // rif->init();
+    }
 }
 
-void GpsTrackingModule::disableGps()
+void GpsTrackingModule::disableGpsAndLora()
 {
+    sleeping = true;
+    config.device.led_heartbeat_disabled = true;
+
     if (gpsIsOn) {
         config.position.gps_update_interval = GPS_UPDATE_SECS_IDLE;
         config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
@@ -87,21 +111,28 @@ void GpsTrackingModule::disableGps()
     }
 
     RadioInterface *rif = router ? router->getRadioIface() : nullptr;
+    if (rif) {
+        uint8_t retries = 0;
+        const uint8_t maxRetries = 20; // Prevent infinite loop (3-second max timeout)
 
-    uint8_t retries = 0;
-    const uint8_t maxRetries = 10; // Prevent infinite loop (3-second max timeout)
+        config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE;
+        config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_NONE;
 
-    while (!rif->canSleep(true /* deepSleep */) && retries < maxRetries) {
-        LOG_DEBUG("GpsTrackingModule: Waiting for RadioInterface to allow sleep (%d/%d)", retries + 1, maxRetries);
-        delay(300);
-        retries++;
-    }
+        while (!rif->canSleep(true /* deepSleep */) && retries < maxRetries) {
+            LOG_DEBUG("GpsTrackingModule: Waiting for RadioInterface to allow sleep (%d/%d)", retries + 1, maxRetries);
+            delay(300);
+            retries++;
+        }
 
-    if (rif->canSleep(true)) {
-        rif->sleep();
-        LOG_INFO("GpsTrackingModule: RadioInterface Sleep!");
-    } else {
-        LOG_WARN("GpsTrackingModule: RadioInterface busy, sleep skipped");
+        rif->sleeping = true; // hacking flag to skip SX126xInterface<T>::resetAGC() which will wake up rif every 60 sec.
+        if (rif->canSleep(true)) {
+            rif->sleep();
+            LOG_INFO("GpsTrackingModule: RadioInterface Sleep!");
+        } else {
+            LOG_WARN("GpsTrackingModule: RadioInterface busy, sleep skipped");
+            // i don't care, sleep now!
+            rif->sleep();
+        }
     }
 }
 
@@ -146,7 +177,7 @@ int32_t GpsTrackingModule::runOnce()
         if (!active) {
             active = true;
             lastLocationSendMs = now;
-            enableGps();
+            enableGpsAndLora();
             LOG_INFO("GpsTrackingModule: Motion detected - GPS Tracking On (motion)");
         }
     }
@@ -156,7 +187,8 @@ int32_t GpsTrackingModule::runOnce()
 
         if (idle >= IDLE_TIMEOUT_MS) {
             active = false;
-            disableGps();
+            lastLoraSleepMs = now;
+            disableGpsAndLora();
             // LOG_INFO("GpsTrackingModule: No motion for 5 min - GPS Tracking Off");
             return POLL_ACTIVE_MS;
         }
@@ -164,14 +196,15 @@ int32_t GpsTrackingModule::runOnce()
         if (Throttle::hasElapsed(lastLocationSendMs, TRACKING_INTERVAL_MS)) {
             lastLocationSendMs = now;
             sendGpsPayload(motion);
-            // if (motion) {
-            //     LOG_INFO("GpsTrackingModule: GPS Tracking On (motion)");
-            // } else {
-            //     LOG_INFO("GpsTrackingModule: GPS Tracking On (no-motion)");
-            // }
         }
 
         return POLL_ACTIVE_MS;
+    }
+
+    // Lora wake up by something else, put it too sleep again. every 300 sec
+    if (sleeping && Throttle::hasElapsed(lastLoraSleepMs, LORA_SLEEP_RECHECK)) {
+        lastLoraSleepMs = now;
+        disableGpsAndLora();
     }
 
     // Reboot to boot loop until power OK
