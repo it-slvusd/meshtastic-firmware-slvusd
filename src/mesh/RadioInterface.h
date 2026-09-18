@@ -128,6 +128,7 @@ class RadioInterface
     void deliverToReceiver(meshtastic_MeshPacket *p);
 
   public:
+    bool sleeping = false;
     /** pool is the pool we will alloc our rx packets from
      */
     RadioInterface();
