@@ -333,12 +333,38 @@ __attribute__((noinline)) void earlyInitVariant() {}
 
 // wait until power level is safe to continue booting (to avoid bootloops)
 // blink user led in 3 flashes sequence to indicate what is happening
+
+#ifdef ARCH_NRF52
+// nRF52 VDD voltage read (millivolts), defined in platform/nrf52/main-nrf52.cpp
+extern uint16_t getVDDVoltage();
+#endif
+
 void waitUntilPowerLevelSafe()
 {
     while (powerHAL_isPowerLevelSafe() == false) {
 
 #ifdef LED_POWER
+#ifdef ARCH_NRF52
+        digitalWrite(LED_POWER, LED_STATE_OFF);
+        delay(2000);
 
+        uint16_t vddMv = getVDDVoltage();
+        int digits[] = {(vddMv / 1000) % 10, (vddMv / 100) % 10, (vddMv / 10) % 10};
+
+        for (int d = 0; d < 3; d++) {
+            for (int i = 0; i < digits[d]; i++) {
+                digitalWrite(LED_POWER, LED_STATE_ON);
+                delay(200);
+                digitalWrite(LED_POWER, LED_STATE_OFF);
+                delay(200);
+            }
+            delay(400);
+        }
+        
+        delay(2000);
+        if (powerHAL_isVBUSConnected())
+            return;
+#else
         // 3x: blink for 300 ms, pause for 300 ms
 
         for (int i = 0; i < 3; i++) {
@@ -347,6 +373,7 @@ void waitUntilPowerLevelSafe()
             digitalWrite(LED_POWER, LED_STATE_OFF);
             delay(300);
         }
+#endif
 #endif
 
         // sleep for 2s
