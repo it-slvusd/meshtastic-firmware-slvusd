@@ -4,11 +4,6 @@
 #include "concurrency/OSThread.h"
 #include "../mesh/SinglePortModule.h"
 
-#ifndef SAFE_VDD_VOLTAGE_THRESHOLD_MV
-#define SAFE_VDD_VOLTAGE_THRESHOLD_MV 3300
-#endif
-
-
 #pragma pack(push, 1)
 /**
  * @brief 17-Byte Ultra-Compact Payload Structure
@@ -69,8 +64,16 @@ private:
     unsigned long lastLocationSendMs = 0;
     unsigned long lastMotionMs = 0;
     unsigned long lastLoraSleepMs = 0;
-    float prevMagnitude = 9.81f;
+
+    float gravityX = 0.0f;
+    float gravityY = 0.0f;
+    float gravityZ = 0.0f;
+    bool isGravityInitialized = false;
+
     bool active = false;
+
+    uint8_t motionStreak = 0;
+    uint8_t lowBattStreak = 0;
 };
 
 extern GpsTrackingModule *gpsTrackingModule;

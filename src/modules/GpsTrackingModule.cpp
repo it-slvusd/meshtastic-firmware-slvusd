@@ -18,10 +18,7 @@
 
 GpsTrackingModule *gpsTrackingModule;
 
-// --- Tune these thresholds ---
-#define POLL_ACTIVE_MS      200          // Poll accel every 200ms
-#define MOTION_THRESHOLD    1.2f       // Acceleration delta (m/s²) to count as motion
-#define REQUIRED_STREAK     3
+#define REQUIRED_STREAK_LOWBAT      5
 
 #define TRACKING_INTERVAL_MS    15000  // How often to send GPS when active
 #define IDLE_TIMEOUT_MS         300000      // 5 minutes of no motion before turning off GPS
@@ -45,11 +42,11 @@ GpsTrackingModule::GpsTrackingModule()
     , concurrency::OSThread("GpsTracking")
 {
     initLIS3DH();
-    config.power.is_power_saving = true;
+    config.power.is_power_saving = false;
     config.bluetooth.enabled = false;
     
-    config.device.role = meshtastic_Config_DeviceConfig_Role_TRACKER; //meshtastic_Config_DeviceConfig_Role_CLIENT
-    config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY;
+    config.device.role = meshtastic_Config_DeviceConfig_Role_TRACKER;
+    config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_ALL;
 
     config.position.gps_update_interval = GPS_UPDATE_SECS;
     config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
@@ -80,6 +77,7 @@ void GpsTrackingModule::enableGpsAndLora()
     config.device.led_heartbeat_disabled = false;
 
     if (!gpsIsOn) {
+        config.power.is_power_saving = false;
         config.position.gps_update_interval = GPS_UPDATE_SECS; 
         config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
         gps->up();
@@ -89,8 +87,8 @@ void GpsTrackingModule::enableGpsAndLora()
 
     RadioInterface *rif = router ? router->getRadioIface() : nullptr;
     if (rif) {
-        config.device.role = meshtastic_Config_DeviceConfig_Role_TRACKER; //meshtastic_Config_DeviceConfig_Role_CLIENT
-        config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_LOCAL_ONLY;
+        config.device.role = meshtastic_Config_DeviceConfig_Role_TRACKER;
+        config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_ALL;
         rif->sleeping = false;
         rif->reconfigure();
         // rif->init();
@@ -115,6 +113,7 @@ void GpsTrackingModule::disableGpsAndLora()
         uint8_t retries = 0;
         const uint8_t maxRetries = 20; // Prevent infinite loop (3-second max timeout)
 
+        config.power.is_power_saving = true;
         config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE;
         config.device.rebroadcast_mode = meshtastic_Config_DeviceConfig_RebroadcastMode_NONE;
 
@@ -129,12 +128,21 @@ void GpsTrackingModule::disableGpsAndLora()
             rif->sleep();
             LOG_INFO("GpsTrackingModule: RadioInterface Sleep!");
         } else {
-            LOG_WARN("GpsTrackingModule: RadioInterface busy, sleep skipped");
+            LOG_WARN("GpsTrackingModule: RadioInterface busy, sleep skipped?");
             // i don't care, sleep now!
             rif->sleep();
         }
     }
 }
+
+// --- Tune these parameters ---
+#define POLL_ACTIVE_MS              100        // Poll accel every 100ms
+#define MOTION_THRESHOLD            0.6f       // Dynamic acceleration delta (m/s²)
+#define REQUIRED_STREAK             5
+
+// Filter coefficient (0.0 to 1.0). Higher values adapt slower to tilt changes.
+// At 100ms polling, 0.90f creates a ~1 second LPF smoothing window for gravity.
+#define ALPHA_GRAVITY               0.90f      
 
 bool GpsTrackingModule::isMotionDetected()
 {
@@ -142,24 +150,44 @@ bool GpsTrackingModule::isMotionDetected()
     sensors_event_t event;
     lis.getEvent(&event);
 
-    float magnitude = sqrt(event.acceleration.x * event.acceleration.x +
-                           event.acceleration.y * event.acceleration.y +
-                           event.acceleration.z * event.acceleration.z);
-    float delta = fabs(magnitude - prevMagnitude);
-    prevMagnitude = magnitude;
+    float ax = event.acceleration.x;
+    float ay = event.acceleration.y;
+    float az = event.acceleration.z;
 
-    static uint8_t motionStreak = 0;
+    // First run initialization: set static baseline to initial reading
+    if (!isGravityInitialized) {
+        gravityX = ax;
+        gravityY = ay;
+        gravityZ = az;
+        isGravityInitialized = true;
+        return false;
+    }
 
-    // LOG_INFO("GpsTrackingModule: delta=%.2f thresh=%.2f", delta, MOTION_THRESHOLD);
-    if (delta > MOTION_THRESHOLD) {
+    // 1. Low-Pass Filter: Update static gravity & tilt vector per axis
+    gravityX = ALPHA_GRAVITY * gravityX + (1.0f - ALPHA_GRAVITY) * ax;
+    gravityY = ALPHA_GRAVITY * gravityY + (1.0f - ALPHA_GRAVITY) * ay;
+    gravityZ = ALPHA_GRAVITY * gravityZ + (1.0f - ALPHA_GRAVITY) * az;
+
+    // 2. High-Pass Filter: Subtract static gravity vector to isolate dynamic motion
+    float dynX = ax - gravityX;
+    float dynY = ay - gravityY;
+    float dynZ = az - gravityZ;
+
+    // 3. Compute 3D magnitude of dynamic motion only
+    float dynamicAcc = sqrt(dynX * dynX + dynY * dynY + dynZ * dynZ);
+
+    // 4. Leaky bucket streak counter
+    if (dynamicAcc > MOTION_THRESHOLD) {
         motionStreak++;
         if (motionStreak >= REQUIRED_STREAK) {
-            motionStreak = REQUIRED_STREAK;
-            LOG_INFO("GpsTrackingModule: delta=%.2f thresh=%.2f - motion detected!", delta, MOTION_THRESHOLD);
+            motionStreak = REQUIRED_STREAK; // Cap streak counter
+            // LOG_INFO("Motion detected! dynamicAcc=%.2f m/s²", dynamicAcc);
             return true;
         }
     } else {
-        motionStreak = 0;
+        if (motionStreak > 0) {
+            motionStreak--;
+        }
     }
     
     return false;
@@ -184,8 +212,9 @@ int32_t GpsTrackingModule::runOnce()
 
     if (active) {
         unsigned long idle = now - lastMotionMs;
+        unsigned long idle_threshold = (powerStatus->getHasUSB())? 35*1000:IDLE_TIMEOUT_MS; // usb = test mode, idle time = 30 sec
 
-        if (idle >= IDLE_TIMEOUT_MS) {
+        if (idle >= idle_threshold) {
             active = false;
             lastLoraSleepMs = now;
             disableGpsAndLora();
@@ -196,6 +225,8 @@ int32_t GpsTrackingModule::runOnce()
         if (Throttle::hasElapsed(lastLocationSendMs, TRACKING_INTERVAL_MS)) {
             lastLocationSendMs = now;
             sendGpsPayload(motion);
+
+            LOG_INFO("GpsTrackingModule: runOnce - idle for %ld sec", idle/1000);
         }
 
         return POLL_ACTIVE_MS;
@@ -210,12 +241,23 @@ int32_t GpsTrackingModule::runOnce()
     // Reboot to boot loop until power OK
     int BattMv = powerStatus->getBatteryVoltageMv();
     if (BattMv < SAFE_VDD_VOLTAGE_THRESHOLD_MV) {
-        LOG_INFO("GpsTracking: Battery %d (too low)", BattMv);
-        if (!powerStatus->getHasUSB()) {
-            digitalWrite(PIN_3V3_EN, LOW);
-            rebootAtMsec = millis() + 5000;
-            return disable();
+        lowBattStreak++;
+
+        if (lowBattStreak >= REQUIRED_STREAK_LOWBAT ) {
+            LOG_INFO("GpsTracking: Battery %d (too low)", BattMv);
+            if (!powerStatus->getHasUSB()) {
+
+                // send 1 packet before die
+                sendGpsPayload(false);
+                delay(5000);
+
+                digitalWrite(PIN_3V3_EN, LOW);
+                rebootAtMsec = millis() + 5000;
+                return disable();
+            }
         }
+    } else {
+        lowBattStreak = 0;
     }
 
     return POLL_ACTIVE_MS;
