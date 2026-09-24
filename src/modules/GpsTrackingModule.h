@@ -62,8 +62,13 @@ private:
     void disableGps();
     void enableLora();
     void disableLora();
+
+    void keepLoraSleep();
+    bool needDeepSleep();
+
     bool isMotionDetected();
     void sendGpsPayload(bool motionActive);
+    void heartbeat(uint32_t hbInterval);
 
     unsigned long lastLocationSendMs = 0;
     unsigned long lastMotionMs = 0;

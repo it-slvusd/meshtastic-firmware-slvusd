@@ -31,6 +31,7 @@ GpsTrackingModule *gpsTrackingModule;
 #define GPS_BROADCAST_SECS      3 * 60 * 60 // 3hr
 
 #define BATTERY_KEEP_LORA_ON    3700
+#define HB_INTERVAL             6*60*60*1000 // 6hr
 // -----------------------------
 
 #define LIS3DH_ADDR 0x18
@@ -213,6 +214,71 @@ bool GpsTrackingModule::isMotionDetected()
     return false;
 }
 
+void GpsTrackingModule::keepLoraSleep() {
+    // Lora wake up by something else, put it too sleep again. every 300 sec
+    if (sleeping && Throttle::hasElapsed(lastLoraSleepMs, LORA_SLEEP_RECHECK)) {
+        lastLoraSleepMs = millis();
+
+        // if we have power, stay on mesh
+        int BattMv = powerStatus->getBatteryVoltageMv();
+        if (BattMv < BATTERY_KEEP_LORA_ON)
+            disableLora();
+    }
+}
+
+bool GpsTrackingModule::needDeepSleep() {
+    unsigned long now = millis();
+    // Reboot to boot loop until power OK
+    if (Throttle::hasElapsed(lastBatteryCheckMs, BATTERY_RECHECK)) {
+        lastBatteryCheckMs = now;
+    
+        int BattMv = powerStatus->getBatteryVoltageMv();
+        if (BattMv < SAFE_VDD_VOLTAGE_THRESHOLD_MV) {
+            lowBattStreak++;
+
+            if (lowBattStreak >= REQUIRED_STREAK_LOWBAT ) {
+                LOG_INFO("GpsTracking: Battery %d (too low) thredhold: %d", BattMv, SAFE_VDD_VOLTAGE_THRESHOLD_MV);
+                if (!powerStatus->getHasUSB()) {
+
+                    // send 1 packet before die
+                    if (sleeping) {
+                        wakeUp();
+                        delay(5000);
+                    }
+
+                    lastLocationSendMs = now;
+                    sendGpsPayload(false);
+                    delay(5000);
+
+                    // digitalWrite(PIN_3V3_EN, LOW);
+                    goSleep();
+
+                    rebootAtMsec = millis() + 5000;
+                    return true;
+                }
+            }
+        } else {
+            lowBattStreak = 0;
+        }
+    }
+    return false;
+}
+
+void GpsTrackingModule::heartbeat(uint32_t hbInterval) {
+    if (!sleeping)
+        return;
+
+    if (Throttle::hasElapsed(lastLocationSendMs, hbInterval)) {
+        delay(5000);
+
+        lastLocationSendMs = millis();
+        sendGpsPayload(false);
+
+        delay(5000);
+        goSleep();
+    }
+}
+
 int32_t GpsTrackingModule::runOnce()
 {
     // LOG_INFO("GpsTrackingModule: runOnce()");
@@ -248,45 +314,11 @@ int32_t GpsTrackingModule::runOnce()
         }
     }
 
-    // Lora wake up by something else, put it too sleep again. every 300 sec
-    if (sleeping && Throttle::hasElapsed(lastLoraSleepMs, LORA_SLEEP_RECHECK)) {
-        lastLoraSleepMs = now;
-
-        // if we have power, stay on mesh
-        int BattMv = powerStatus->getBatteryVoltageMv();
-        if (BattMv < BATTERY_KEEP_LORA_ON)
-            disableLora();
-    }
-
-    // Reboot to boot loop until power OK
-    if (Throttle::hasElapsed(lastBatteryCheckMs, BATTERY_RECHECK)) {
-        lastBatteryCheckMs = now;
-    
-        int BattMv = powerStatus->getBatteryVoltageMv();
-        if (BattMv < SAFE_VDD_VOLTAGE_THRESHOLD_MV) {
-            lowBattStreak++;
-
-            if (lowBattStreak >= REQUIRED_STREAK_LOWBAT ) {
-                LOG_INFO("GpsTracking: Battery %d (too low) thredhold: %d", BattMv, SAFE_VDD_VOLTAGE_THRESHOLD_MV);
-                if (!powerStatus->getHasUSB()) {
-
-                    // send 1 packet before die
-                    wakeUp();
-                    delay(5000);
-                    lastLocationSendMs = now;
-                    sendGpsPayload(motion);
-                    delay(5000);
-                    // digitalWrite(PIN_3V3_EN, LOW);
-                    goSleep();
-
-                    rebootAtMsec = millis() + 5000;
-                    return disable();
-                }
-            }
-        } else {
-            lowBattStreak = 0;
-        }
-    }
+    heartbeat(HB_INTERVAL);
+    keepLoraSleep();
+    bool needSleep = needDeepSleep();
+    if (needSleep)
+        return disable();
 
     return POLL_ACTIVE_MS;
 }
