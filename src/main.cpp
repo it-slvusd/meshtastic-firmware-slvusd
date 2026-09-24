@@ -354,16 +354,25 @@ void waitUntilPowerLevelSafe()
         for (int d = 0; d < 3; d++) {
             for (int i = 0; i < digits[d]; i++) {
                 digitalWrite(LED_POWER, LED_STATE_ON);
-                delay(200);
+                delay(30);
                 digitalWrite(LED_POWER, LED_STATE_OFF);
-                delay(200);
+                delay(300);
             }
-            delay(400);
+            delay(500);
         }
         
         delay(2000);
-        if (powerHAL_isVBUSConnected())
-            return;
+        if (powerHAL_isVBUSConnected()) {
+            // u-blox GPS start up will sink current too much and cause uC hang
+            // wait until voltage is enough
+            if (vddMv > 2700) 
+                return;
+        } else {
+            // if voltage too low, delay more time to charge battery
+            // user need to wait < 20s after pluggin to see response.
+            if (vddMv < 3000)
+                delay(20000);
+        }
 #else
         // 3x: blink for 300 ms, pause for 300 ms
 
