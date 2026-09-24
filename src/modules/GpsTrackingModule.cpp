@@ -24,10 +24,13 @@ GpsTrackingModule *gpsTrackingModule;
 #define IDLE_TIMEOUT_MS         300000      // 5 minutes of no motion before turning off GPS
 
 #define LORA_SLEEP_RECHECK      30 * 1000
+#define BATTERY_RECHECK         5 * 1000
 
 #define GPS_UPDATE_SECS         8
 #define GPS_UPDATE_SECS_IDLE    3 * 60 * 60 // 3hr
 #define GPS_BROADCAST_SECS      3 * 60 * 60 // 3hr
+
+#define BATTERY_KEEP_LORA_ON    3700
 // -----------------------------
 
 #define LIS3DH_ADDR 0x18
@@ -71,11 +74,28 @@ void GpsTrackingModule::initLIS3DH()
     }
 }
 
-void GpsTrackingModule::enableGpsAndLora()
-{
+void GpsTrackingModule::wakeUp() {
     sleeping = false;
-    config.device.led_heartbeat_disabled = false;
+    config.device.led_heartbeat_disabled = false;    
 
+    enableGps();
+    enableLora();
+}
+
+void GpsTrackingModule::goSleep() {
+    sleeping = true;
+    config.device.led_heartbeat_disabled = true;
+
+    disableGps();
+
+    // if we have power, stay on mesh
+    int BattMv = powerStatus->getBatteryVoltageMv();
+    if (BattMv < BATTERY_KEEP_LORA_ON)
+        disableLora();
+}
+
+void GpsTrackingModule::enableGps()
+{
     if (!gpsIsOn) {
         config.power.is_power_saving = false;
         config.position.gps_update_interval = GPS_UPDATE_SECS; 
@@ -84,7 +104,19 @@ void GpsTrackingModule::enableGpsAndLora()
         gpsIsOn = true;
         LOG_INFO("GpsTrackingModule: GPS powered ONNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN");
     }
+}
 
+void GpsTrackingModule::disableGps() {
+    if (gpsIsOn) {
+        config.position.gps_update_interval = GPS_UPDATE_SECS_IDLE;
+        config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
+        gps->down();
+        gpsIsOn = false;
+        LOG_INFO("GpsTrackingModule: GPS powered OFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
+    }
+}
+
+void GpsTrackingModule::enableLora() {
     RadioInterface *rif = router ? router->getRadioIface() : nullptr;
     if (rif) {
         config.device.role = meshtastic_Config_DeviceConfig_Role_TRACKER;
@@ -95,19 +127,7 @@ void GpsTrackingModule::enableGpsAndLora()
     }
 }
 
-void GpsTrackingModule::disableGpsAndLora()
-{
-    sleeping = true;
-    config.device.led_heartbeat_disabled = true;
-
-    if (gpsIsOn) {
-        config.position.gps_update_interval = GPS_UPDATE_SECS_IDLE;
-        config.position.position_broadcast_secs = GPS_BROADCAST_SECS;
-        gps->down();
-        gpsIsOn = false;
-        LOG_INFO("GpsTrackingModule: GPS powered OFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
-    }
-
+void GpsTrackingModule::disableLora() {
     RadioInterface *rif = router ? router->getRadioIface() : nullptr;
     if (rif) {
         uint8_t retries = 0;
@@ -205,7 +225,7 @@ int32_t GpsTrackingModule::runOnce()
         if (!active) {
             active = true;
             lastLocationSendMs = now;
-            enableGpsAndLora();
+            wakeUp();
             LOG_INFO("GpsTrackingModule: Motion detected - GPS Tracking On (motion)");
         }
     }
@@ -217,9 +237,7 @@ int32_t GpsTrackingModule::runOnce()
         if (idle >= idle_threshold) {
             active = false;
             lastLoraSleepMs = now;
-            disableGpsAndLora();
-            // LOG_INFO("GpsTrackingModule: No motion for 5 min - GPS Tracking Off");
-            return POLL_ACTIVE_MS;
+            goSleep();
         }
 
         if (Throttle::hasElapsed(lastLocationSendMs, TRACKING_INTERVAL_MS)) {
@@ -228,36 +246,46 @@ int32_t GpsTrackingModule::runOnce()
 
             LOG_INFO("GpsTrackingModule: runOnce - idle for %ld sec", idle/1000);
         }
-
-        return POLL_ACTIVE_MS;
     }
 
     // Lora wake up by something else, put it too sleep again. every 300 sec
     if (sleeping && Throttle::hasElapsed(lastLoraSleepMs, LORA_SLEEP_RECHECK)) {
         lastLoraSleepMs = now;
-        disableGpsAndLora();
+
+        // if we have power, stay on mesh
+        int BattMv = powerStatus->getBatteryVoltageMv();
+        if (BattMv < BATTERY_KEEP_LORA_ON)
+            disableLora();
     }
 
     // Reboot to boot loop until power OK
-    int BattMv = powerStatus->getBatteryVoltageMv();
-    if (BattMv < SAFE_VDD_VOLTAGE_THRESHOLD_MV) {
-        lowBattStreak++;
+    if (Throttle::hasElapsed(lastBatteryCheckMs, BATTERY_RECHECK)) {
+        lastBatteryCheckMs = now;
+    
+        int BattMv = powerStatus->getBatteryVoltageMv();
+        if (BattMv < SAFE_VDD_VOLTAGE_THRESHOLD_MV) {
+            lowBattStreak++;
 
-        if (lowBattStreak >= REQUIRED_STREAK_LOWBAT ) {
-            LOG_INFO("GpsTracking: Battery %d (too low)", BattMv);
-            if (!powerStatus->getHasUSB()) {
+            if (lowBattStreak >= REQUIRED_STREAK_LOWBAT ) {
+                LOG_INFO("GpsTracking: Battery %d (too low) thredhold: %d", BattMv, SAFE_VDD_VOLTAGE_THRESHOLD_MV);
+                if (!powerStatus->getHasUSB()) {
 
-                // send 1 packet before die
-                sendGpsPayload(false);
-                delay(5000);
+                    // send 1 packet before die
+                    wakeUp();
+                    delay(5000);
+                    lastLocationSendMs = now;
+                    sendGpsPayload(motion);
+                    delay(5000);
+                    // digitalWrite(PIN_3V3_EN, LOW);
+                    goSleep();
 
-                digitalWrite(PIN_3V3_EN, LOW);
-                rebootAtMsec = millis() + 5000;
-                return disable();
+                    rebootAtMsec = millis() + 5000;
+                    return disable();
+                }
             }
+        } else {
+            lowBattStreak = 0;
         }
-    } else {
-        lowBattStreak = 0;
     }
 
     return POLL_ACTIVE_MS;

@@ -56,14 +56,19 @@ protected:
 
 private:
     void initLIS3DH();
-    void enableGpsAndLora();
-    void disableGpsAndLora();
+    void wakeUp();
+    void goSleep();
+    void enableGps();
+    void disableGps();
+    void enableLora();
+    void disableLora();
     bool isMotionDetected();
     void sendGpsPayload(bool motionActive);
 
     unsigned long lastLocationSendMs = 0;
     unsigned long lastMotionMs = 0;
     unsigned long lastLoraSleepMs = 0;
+    unsigned long lastBatteryCheckMs = 0;
 
     float gravityX = 0.0f;
     float gravityY = 0.0f;
